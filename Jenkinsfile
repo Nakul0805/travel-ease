@@ -16,7 +16,7 @@ pipeline {
 
     stage('Docker Build') {
       steps {
-        sh 'docker build -t $ECR_REPO:$IMAGE_TAG .'
+        sh 'docker build -t 726661503021.dkr.ecr.ap-south-1.amazonaws.com/travel-ease .'
       }
     }
 
