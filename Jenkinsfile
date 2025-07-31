@@ -4,7 +4,7 @@ pipeline {
   environment {
     AWS_REGION = 'ap-south-1'
     ECR_REPO = '726661503021.dkr.ecr.ap-south-1.amazonaws.com/travel-ease'
-    IMAGE_TAG = "v1"
+    IMAGE_TAG = "latest"
   }
 
   stages {
