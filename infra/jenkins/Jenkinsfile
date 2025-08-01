@@ -1,19 +1,47 @@
 pipeline {
-    agent any
+    agent {
+        docker { // Optional: use a Docker-in-Docker agent or ensure Docker is available
+            image 'jenkins/inbound-agent:latest' // Or any image with Docker CLI
+            args '--docker-host=tcp://docker:2376 --docker-cert-path=/certs/client'
+        }
+    }
     environment {
-        AWS_DEFAULT_REGION = 'ap-south-1'
-        AWS_ACCOUNT_ID     = '726661503021'
-        ECR_REPO           = 'travelease-booking'  // Standardized to match Terraform
-        REPO_URI           = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        
-        // Recommended: Use Jenkins credentials
-        AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+        AWS_DEFAULT_REGION    = 'ap-south-1'
+        AWS_ACCOUNT_ID        = '726661503021'
+        ECR_REPO              = 'travelease-booking'  // Base name
+        REPO_URI              = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+        // ✅ Use one credentials ID that contains AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+        AWS_CREDENTIALS_ID    = 'aws-credentials'  // Jenkins credentials ID (type: Username/Password)
     }
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        stage('Docker Login to ECR') {
+            steps {
+                script {
+                    // 🔐 Retrieve credentials once
+                    withCredentials([usernamePassword(
+                        credentialsId: env.AWS_CREDENTIALS_ID,
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )]) {
+                        sh """
+                            # Configure AWS CLI (optional, but helps)
+                            aws configure set aws_access_key_id \$AWS_ACCESS_KEY_ID
+                            aws configure set aws_secret_access_key \$AWS_SECRET_ACCESS_KEY
+                            aws configure set region ${AWS_DEFAULT_REGION}
+
+                            # Get login password and log in to ECR
+                            aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+                                docker login --username AWS --password-stdin ${REPO_URI}
+                        """
+                    }
+                }
             }
         }
 
@@ -30,34 +58,25 @@ pipeline {
                         steps {
                             dir("services/${SERVICE}") {
                                 script {
-                                    echo "Building Docker image: ${ECR_REPO}-${SERVICE}:${env.BUILD_NUMBER}"
-                                    dockerImage = docker.build("${ECR_REPO}-${SERVICE}:${env.BUILD_NUMBER}")
+                                    def imageName = "${ECR_REPO}-${SERVICE}"
+                                    def imageTag = "${env.REPO_URI}/${imageName}:${env.BUILD_NUMBER}"
+                                    def latestTag = "${env.REPO_URI}/${imageName}:latest"
+
+                                    echo "Building Docker image: ${imageTag}"
+
+                                    // Build image
+                                    docker.build(imageTag)
+
+                                    // Tag as latest
+                                    sh "docker tag ${imageTag} ${latestTag}"
+
+                                    // Push both tags
+                                    sh "docker push ${imageTag}"
+                                    sh "docker push ${latestTag}"
+
+                                    // Export image URI for Terraform
+                                    env["IMAGE_URI_${SERVICE.toUpperCase()}"] = imageTag
                                 }
-                            }
-                        }
-                    }
-                    stage('Push to ECR') {
-                        steps {
-                            script {
-                                def ecrImageName = "${env.REPO_URI}/${env.ECR_REPO}-${params.SERVICE}:${env.BUILD_NUMBER}"
-                                def latestTag = "${env.REPO_URI}/${env.ECR_REPO}-${params.SERVICE}:latest"
-
-                                // Login to ECR
-                                sh """
-                                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
-                                    docker login --username AWS --password-stdin ${REPO_URI}
-                                """
-
-                                // Tag and push build-specific image
-                                sh "docker tag ${ECR_REPO}-${SERVICE}:${env.BUILD_NUMBER} ${ecrImageName}"
-                                sh "docker push ${ecrImageName}"
-
-                                // Optionally push 'latest' tag
-                                sh "docker tag ${ecrImageName} ${latestTag}"
-                                sh "docker push ${latestTag}"
-
-                                // Store image name in environment for Terraform use
-                                env["IMAGE_URI_${SERVICE.toUpperCase()}"] = ecrImageName
                             }
                         }
                     }
@@ -65,27 +84,28 @@ pipeline {
             }
         }
 
-        stage('Terraform Init & Apply') {
+        stage('Terraform Apply') {
             steps {
                 dir('infra/terraform') {
                     sh 'terraform init'
+
+                    // Pass all image URIs to Terraform
                     sh """
                         terraform apply -auto-approve \
-                          -var="booking_image_uri=${env.IMAGE_URI_BOOKING}" \
-                          -var="payment_image_uri=${env.IMAGE_URI_PAYMENT}" \
-                          -var="user_image_uri=${env.IMAGE_URI_USER}" \
-                          -var="frontend_image_uri=${env.IMAGE_URI_FRONTEND}"
+                            -var="booking_image_uri=${env.IMAGE_URI_BOOKING}" \
+                            -var="payment_image_uri=${env.IMAGE_URI_PAYMENT}" \
+                            -var="user_image_uri=${env.IMAGE_URI_USER}" \
+                            -var="frontend_image_uri=${env.IMAGE_URI_FRONTEND}"
                     """
                 }
             }
         }
 
-        stage('ECS Deploy (Redeploy)') {
+        stage('ECS Redeploy (Optional Re-apply)') {
             steps {
+                echo "🔄 Triggering ECS redeployment via Terraform..."
                 dir('infra/terraform') {
-                    sh 'terraform init'
-                    sh 'terraform plan'
-                    sh 'terraform apply -auto-approve'
+                    sh 'terraform apply -auto-approve -target=aws_ecs_service.booking -target=aws_ecs_service.payment -target=aws_ecs_service.user -target=aws_ecs_service.frontend'
                 }
             }
         }
@@ -93,12 +113,17 @@ pipeline {
     post {
         success {
             echo '✅ Deployment succeeded!'
+            slackSend channel: '#deployments', message: "✅ Build ${env.BUILD_NUMBER} deployed successfully to ap-south-1!"
         }
         failure {
             echo '❌ Deployment failed!'
+            slackSend channel: '#alerts', message: "❌ Build ${env.BUILD_NUMBER} failed!"
         }
         always {
             cleanWs()
+            // Reset AWS config if needed
+            sh 'aws configure set aws_access_key_id ""'
+            sh 'aws configure set aws_secret_access_key ""'
         }
     }
 }
