@@ -6,7 +6,6 @@ pipeline {
         ECR_REPO           = 'travelease-booking'
         REPO_URI           = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
         
-        // ✅ Use one credentials ID that contains both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
         AWS_CREDENTIALS_ID = 'aws-ecr-credentials'  // Replace with your actual Jenkins credential ID
     }
     stages {
@@ -107,9 +106,7 @@ pipeline {
             echo '❌ Deployment failed!'
         }
         always {
-            node {  // ✅ Wrap cleanWs() in a node block
-                cleanWs()
-            }
+            cleanWs()  // ✅ No need for node block here
         }
     }
 }
