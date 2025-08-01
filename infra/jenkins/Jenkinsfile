@@ -6,8 +6,8 @@ pipeline {
         ECR_REPO           = 'travelease-booking'
         REPO_URI           = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
         
-        AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+        // ✅ Use one credentials ID that contains both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+        AWS_CREDENTIALS_ID = 'aws-ecr-credentials'  // Replace with your actual Jenkins credential ID
     }
     stages {
         stage('Checkout') {
@@ -38,14 +38,24 @@ pipeline {
                     stage('Push to ECR') {
                         steps {
                             script {
-                                def ecrImageName = "${env.REPO_URI}/${env.ECR_REPO}-${params.SERVICE}:${env.BUILD_NUMBER}"
-                                def latestTag = "${env.REPO_URI}/${env.ECR_REPO}-${params.SERVICE}:latest"
+                                def ecrImageName = "${env.REPO_URI}/${ECR_REPO}-${SERVICE}:${env.BUILD_NUMBER}"
+                                def latestTag = "${env.REPO_URI}/${ECR_REPO}-${SERVICE}:latest"
 
                                 // Login to ECR
-                                sh """
-                                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
-                                    docker login --username AWS --password-stdin ${REPO_URI}
-                                """
+                                withCredentials([usernamePassword(
+                                    credentialsId: env.AWS_CREDENTIALS_ID,
+                                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                                )]) {
+                                    sh """
+                                        aws configure set aws_access_key_id \$AWS_ACCESS_KEY_ID
+                                        aws configure set aws_secret_access_key \$AWS_SECRET_ACCESS_KEY
+                                        aws configure set region ${AWS_DEFAULT_REGION}
+
+                                        aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+                                        docker login --username AWS --password-stdin ${REPO_URI}
+                                    """
+                                }
 
                                 // Tag and push build-specific image
                                 sh "docker tag ${ECR_REPO}-${SERVICE}:${env.BUILD_NUMBER} ${ecrImageName}"
@@ -97,7 +107,9 @@ pipeline {
             echo '❌ Deployment failed!'
         }
         always {
-            cleanWs()  // ✅ No need for node block here
+            node {  // ✅ Wrap cleanWs() in a node block
+                cleanWs()
+            }
         }
     }
 }
