@@ -1,2 +1,0 @@
-# travel-ease
-internship project
